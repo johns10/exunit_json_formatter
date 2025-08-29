@@ -40,4 +40,11 @@ defmodule ExUnitJsonFormatterTest do
         "err" => %{"file" => "test/exunit_json_formatter_test.exs",
                    "message" => message}}
   end
+
+  test "handles excluded test" do
+    test = %ExUnit.Test{case: TestModule, name: :'should test', state: {:excluded, "due to integration filter"}}
+    initial_state = %{skipped_counter: 0}
+    {:noreply, new_state} = ExUnitJsonFormatter.handle_cast({:test_finished, test}, initial_state)
+    assert new_state.skipped_counter == 1
+  end
 end

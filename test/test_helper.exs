@@ -1,1 +1,1 @@
-ExUnit.start(%{formatters: [ExUnitJsonFormatter]})
+ExUnit.start(formatters: [ExUnitJsonFormatter])

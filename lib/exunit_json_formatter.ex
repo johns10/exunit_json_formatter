@@ -1,5 +1,6 @@
 defmodule ExUnitJsonFormatter do
   use GenServer
+
   @moduledoc """
   Formats ExUnit output as a stream of JSON objects (roughly compatible
   with Mocha's json-stream reporter)
@@ -16,23 +17,50 @@ defmodule ExUnitJsonFormatter do
       skipped_counter: 0,
       invalid_counter: 0,
       case_counter: 0,
-      start_time: nil
+      start_time: nil,
+      tests: [],
+      failures: [],
+      pending: []
     }
+
     {:ok, config}
   end
 
   def handle_cast({:suite_started, opts}, state) do
-    ["start", %{"including" => opts[:include],
-                "excluding" => opts[:exclude]}]
-    |> Poison.encode!
-    |> IO.puts
-    {:noreply, %{state | start_time: NaiveDateTime.utc_now}}
+    {:noreply, %{state | start_time: NaiveDateTime.utc_now()}}
   end
 
   def handle_cast({:suite_finished, run_us, load_us}, state) do
-    ["end",format_stats(state, run_us, load_us)]
-    |> Poison.encode!
-    |> IO.puts
+    stats = format_stats(state, run_us, load_us)
+    
+    result = %{
+      "stats" => stats,
+      "tests" => Enum.reverse(state[:tests]),
+      "failures" => Enum.reverse(state[:failures]),
+      "pending" => Enum.reverse(state[:pending])
+    }
+    
+    result
+    |> Poison.encode!()
+    |> IO.puts()
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:suite_finished, %{run: run_us, load: load_us}}, state) do
+    stats = format_stats(state, run_us, load_us)
+    
+    result = %{
+      "stats" => stats,
+      "tests" => Enum.reverse(state[:tests]),
+      "failures" => Enum.reverse(state[:failures]),
+      "pending" => Enum.reverse(state[:pending])
+    }
+    
+    result
+    |> Poison.encode!()
+    |> IO.puts()
+
     {:noreply, state}
   end
 
@@ -40,11 +68,20 @@ defmodule ExUnitJsonFormatter do
     {:noreply, state}
   end
 
-  def handle_cast({:case_finished, test_case = %ExUnit.TestCase{state: {:failed, failure}}}, state) do
-    ["fail", format_test_case_failure(test_case, failure)]
-    |> Poison.encode!
-    |> IO.puts
+  def handle_cast({:module_started, _}, state) do
     {:noreply, state}
+  end
+
+  def handle_cast({:module_finished, _}, state) do
+    {:noreply, state}
+  end
+
+  def handle_cast(
+        {:case_finished, test_case = %ExUnit.TestCase{state: {:failed, failure}}},
+        state
+      ) do
+    test_result = format_test_case_failure(test_case, failure)
+    {:noreply, %{state | failures: [test_result | state[:failures]]}}
   end
 
   def handle_cast({:case_finished, _}, state) do
@@ -56,25 +93,39 @@ defmodule ExUnitJsonFormatter do
   end
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: nil}}, state) do
-    ["pass", format_test_pass(test)]
-    |> Poison.encode!
-    |> IO.puts
-    {:noreply, %{state | pass_counter: state[:pass_counter] + 1}}
+    test_result = format_test_pass(test)
+    {:noreply, %{state | 
+      pass_counter: state[:pass_counter] + 1,
+      tests: [test_result | state[:tests]]
+    }}
   end
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: {:failed, failure}}}, state) do
-    ["fail", format_test_failure(test, failure)]
-    |> Poison.encode!
-    |> IO.puts
-    {:noreply, %{state | failure_counter: state[:failure_counter] + 1}}
+    test_result = format_test_failure(test, failure)
+    {:noreply, %{state | 
+      failure_counter: state[:failure_counter] + 1,
+      failures: [test_result | state[:failures]]
+    }}
   end
 
-  def handle_cast({:test_finished, %ExUnit.Test{state: {:skip, _}}}, state) do
-    {:noreply, %{state | skipped_counter: state[:skipped_counter] + 1}}
+  def handle_cast({:test_finished, test = %ExUnit.Test{state: {:skip, _}}}, state) do
+    test_result = format_test_pass(test) |> Map.put("pending", true)
+    {:noreply, %{state | 
+      skipped_counter: state[:skipped_counter] + 1,
+      pending: [test_result | state[:pending]]
+    }}
   end
 
   def handle_cast({:test_finished, %ExUnit.Test{state: {:invalid, _}}}, state) do
     {:noreply, %{state | invalid_counter: state[:invalid_counter] + 1}}
+  end
+
+  def handle_cast({:test_finished, test = %ExUnit.Test{state: {:excluded, _}}}, state) do
+    test_result = format_test_pass(test) |> Map.put("pending", true)
+    {:noreply, %{state | 
+      skipped_counter: state[:skipped_counter] + 1,
+      pending: [test_result | state[:pending]]
+    }}
   end
 
   # FORMATTING FUNCTIONS
@@ -82,23 +133,35 @@ defmodule ExUnitJsonFormatter do
 
   @counter_padding ""
   @width 80
-  @no_value ExUnit.AssertionError.no_value
+  @no_value ExUnit.AssertionError.no_value()
 
   @doc """
   Receives test stats and formats them to JSON
   """
-  def format_stats(%{pass_counter: passed, failure_counter: failed, skipped_counter: skipped,
-                     invalid_counter: invalid, case_counter: cases, start_time: start},
-                   run_us, load_us) do
-    stats = %{"duration" => run_us / 1_000,
-              "start" => NaiveDateTime.to_iso8601(start),
-              "end" => NaiveDateTime.to_iso8601(NaiveDateTime.utc_now),
-              "passes" => passed,
-              "failures" => failed,
-              "pending" => skipped,
-              "invalid" => invalid,
-              "tests" => passed + failed + skipped + invalid,
-              "suites" => cases}
+  def format_stats(
+        %{
+          pass_counter: passed,
+          failure_counter: failed,
+          skipped_counter: skipped,
+          invalid_counter: invalid,
+          case_counter: cases,
+          start_time: start
+        },
+        run_us,
+        load_us
+      ) do
+    stats = %{
+      "duration" => run_us / 1_000,
+      "start" => NaiveDateTime.to_iso8601(start),
+      "end" => NaiveDateTime.to_iso8601(NaiveDateTime.utc_now()),
+      "passes" => passed,
+      "failures" => failed,
+      "pending" => skipped,
+      "invalid" => invalid,
+      "tests" => passed + failed + skipped + invalid,
+      "suites" => cases
+    }
+
     if not is_nil(load_us), do: Map.put(stats, "loadTime", load_us / 1_000), else: stats
   end
 
@@ -108,7 +171,7 @@ defmodule ExUnitJsonFormatter do
   def format_test_pass(test) do
     %ExUnit.Test{case: case, name: name} = test
     name_str = Atom.to_string(name)
-    case_str = case |> Atom.to_string |> String.trim_leading("Elixir.")
+    case_str = case |> Atom.to_string() |> String.trim_leading("Elixir.")
 
     %{"title" => name_str, "fullTitle" => "#{case_str}: #{name_str}"}
   end
@@ -118,16 +181,22 @@ defmodule ExUnitJsonFormatter do
   """
   def format_test_failure(test, failures) do
     %ExUnit.Test{name: name, case: case, tags: tags} = test
-    message = Enum.map_join(Enum.with_index(failures), "", fn {{kind, reason, stack}, index} ->
-      {text, stack} = format_kind_reason(test, kind, reason, stack, @width)
-      failure_header(failures, index) <> text <> format_stacktrace(stack, case, name, nil)
-     end) <> report(tags, failures, @width)
 
-    %{"title" => to_string(name),
-      "fullTitle" => "#{inspect case}: #{name}",
-      "err" => %{"file" => Path.relative_to_cwd(tags[:file]),
-                 "line" => tags[:line],
-                 "message" => message}}
+    message =
+      Enum.map_join(Enum.with_index(failures), "", fn {{kind, reason, stack}, index} ->
+        {text, stack} = format_kind_reason(test, kind, reason, stack, @width)
+        failure_header(failures, index) <> text <> format_stacktrace(stack, case, name, nil)
+      end) <> report(tags, failures, @width)
+
+    %{
+      "title" => to_string(name),
+      "fullTitle" => "#{inspect(case)}: #{name}",
+      "err" => %{
+        "file" => Path.relative_to_cwd(tags[:file]),
+        "line" => tags[:line],
+        "message" => message
+      }
+    }
   end
 
   defp format_assertion_error(test, struct, stack, width, counter_padding) do
@@ -151,6 +220,7 @@ defmodule ExUnitJsonFormatter do
     case Map.take(tags, List.wrap(tags[:report])) do
       report when map_size(report) == 0 ->
         ""
+
       report ->
         report_spacing(failures) <>
           "tags:" <>
@@ -170,16 +240,19 @@ defmodule ExUnitJsonFormatter do
   def format_test_case_failure(test_case, failures) do
     %ExUnit.TestCase{name: name, tests: tests} = test_case
     tags = tests |> hd |> Map.get(:tags)
-    title = "#{inspect name}: failure on setup_all callback"
-    message = Enum.map_join Enum.with_index(failures), "", fn {{kind, reason, stack}, index} ->
-      {text, stack} = format_kind_reason(test_case, kind, reason, stack, 80)
-      failure_header(failures, index) <> text <> format_stacktrace(stack, name, nil, nil)
-    end
+    title = "#{inspect(name)}: failure on setup_all callback"
 
-    %{"title" => title,
+    message =
+      Enum.map_join(Enum.with_index(failures), "", fn {{kind, reason, stack}, index} ->
+        {text, stack} = format_kind_reason(test_case, kind, reason, stack, 80)
+        failure_header(failures, index) <> text <> format_stacktrace(stack, name, nil, nil)
+      end)
+
+    %{
+      "title" => title,
       "fullTitle" => title,
-      "err" => %{"file" => Path.relative_to_cwd(tags[:file]),
-                 "message" => message}}
+      "err" => %{"file" => Path.relative_to_cwd(tags[:file]), "message" => message}
+    }
   end
 
   defp format_kind_reason(test, :error, %ExUnit.AssertionError{} = struct, stack, width) do
@@ -200,15 +273,22 @@ defmodule ExUnitJsonFormatter do
   end
 
   defp get_code(%{case: case, name: name}, stack) do
-    info = Enum.find_value(stack, fn {^case, ^name, _, info} -> info; _ -> nil end)
+    info =
+      Enum.find_value(stack, fn
+        {^case, ^name, _, info} -> info
+        _ -> nil
+      end)
+
     file = info[:file]
     line = info[:line]
+
     if line > 0 && file && File.exists?(file) do
-      file |> File.stream! |> Enum.at(line - 1) |> String.trim
+      file |> File.stream!() |> Enum.at(line - 1) |> String.trim()
     end
   rescue
     _ -> nil
   end
+
   defp get_code(%{}, _) do
     nil
   end
@@ -253,9 +333,11 @@ defmodule ExUnitJsonFormatter do
     padding = String.duplicate(" ", padding_size)
     String.replace(expr, "\n", "\n" <> padding)
   end
+
   defp code_multiline({fun, _, [expr]}, padding_size) when is_atom(fun) do
     code_multiline(Atom.to_string(fun) <> " " <> Macro.to_string(expr), padding_size)
   end
+
   defp code_multiline(expr, padding_size) do
     code_multiline(Macro.to_string(expr), padding_size)
   end
@@ -263,7 +345,8 @@ defmodule ExUnitJsonFormatter do
   defp inspect_multiline(expr, padding_size, width) do
     padding = String.duplicate(" ", padding_size)
     width = if width == :infinity, do: width, else: width - padding_size
-    inspect(expr, [pretty: true, width: width])
+
+    inspect(expr, pretty: true, width: width)
     |> String.replace("\n", "\n" <> padding)
   end
 
@@ -277,6 +360,7 @@ defmodule ExUnitJsonFormatter do
     case format_diff(left, right) do
       {left, right} ->
         {IO.iodata_to_binary(left), IO.iodata_to_binary(right)}
+
       nil ->
         {if_value(left, inspect), if_value(right, inspect)}
     end
@@ -308,6 +392,7 @@ defmodule ExUnitJsonFormatter do
 
   defp edit_script(left, right) do
     task = Task.async(ExUnit.Diff, :script, [left, right])
+
     case Task.yield(task, 1_500) || Task.shutdown(task, :brutal_kill) do
       {:ok, script} -> script
       nil -> nil
@@ -321,7 +406,7 @@ defmodule ExUnitJsonFormatter do
   defp format_stacktrace(stacktrace, test_case, test, color) do
     "stacktrace:" <>
       Enum.map_join(stacktrace, fn entry ->
-        stacktrace_info format_stacktrace_entry(entry, test_case, test), color
+        stacktrace_info(format_stacktrace_entry(entry, test_case, test), color)
       end)
   end
 
@@ -334,9 +419,8 @@ defmodule ExUnitJsonFormatter do
   end
 
   defp failure_header([_], _), do: ""
-  defp failure_header(_, i), do: "\n#{@counter_padding}Failure ##{i+1}\n"
+  defp failure_header(_, i), do: "\n#{@counter_padding}Failure ##{i + 1}\n"
 
   defp stacktrace_info("", _formatter), do: ""
-  defp stacktrace_info(msg, nil),       do: "       " <> msg <> "\n"
-
+  defp stacktrace_info(msg, nil), do: "       " <> msg <> "\n"
 end
