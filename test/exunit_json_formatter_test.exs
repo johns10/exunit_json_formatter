@@ -43,8 +43,9 @@ defmodule ExUnitJsonFormatterTest do
 
   test "handles excluded test" do
     test = %ExUnit.Test{case: TestModule, name: :'should test', state: {:excluded, "due to integration filter"}}
-    initial_state = %{skipped_counter: 0}
+    initial_state = %{skipped_counter: 0, pending: []}
     {:noreply, new_state} = ExUnitJsonFormatter.handle_cast({:test_finished, test}, initial_state)
     assert new_state.skipped_counter == 1
+    assert length(new_state.pending) == 1
   end
 end
