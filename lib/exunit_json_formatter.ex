@@ -26,20 +26,20 @@ defmodule ExUnitJsonFormatter do
     {:ok, config}
   end
 
-  def handle_cast({:suite_started, opts}, state) do
+  def handle_cast({:suite_started, _opts}, state) do
     {:noreply, %{state | start_time: NaiveDateTime.utc_now()}}
   end
 
   def handle_cast({:suite_finished, run_us, load_us}, state) do
     stats = format_stats(state, run_us, load_us)
-    
+
     result = %{
       "stats" => stats,
       "tests" => Enum.reverse(state[:tests]),
       "failures" => Enum.reverse(state[:failures]),
       "pending" => Enum.reverse(state[:pending])
     }
-    
+
     result
     |> Poison.encode!()
     |> IO.puts()
@@ -49,14 +49,14 @@ defmodule ExUnitJsonFormatter do
 
   def handle_cast({:suite_finished, %{run: run_us, load: load_us}}, state) do
     stats = format_stats(state, run_us, load_us)
-    
+
     result = %{
       "stats" => stats,
       "tests" => Enum.reverse(state[:tests]),
       "failures" => Enum.reverse(state[:failures]),
       "pending" => Enum.reverse(state[:pending])
     }
-    
+
     result
     |> Poison.encode!()
     |> IO.puts()
@@ -94,26 +94,31 @@ defmodule ExUnitJsonFormatter do
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: nil}}, state) do
     test_result = format_test_pass(test)
-    {:noreply, %{state | 
-      pass_counter: state[:pass_counter] + 1,
-      tests: [test_result | state[:tests]]
-    }}
+
+    {:noreply,
+     %{state | pass_counter: state[:pass_counter] + 1, tests: [test_result | state[:tests]]}}
   end
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: {:failed, failure}}}, state) do
     test_result = format_test_failure(test, failure)
-    {:noreply, %{state | 
-      failure_counter: state[:failure_counter] + 1,
-      failures: [test_result | state[:failures]]
-    }}
+
+    {:noreply,
+     %{
+       state
+       | failure_counter: state[:failure_counter] + 1,
+         failures: [test_result | state[:failures]]
+     }}
   end
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: {:skip, _}}}, state) do
     test_result = format_test_pass(test) |> Map.put("pending", true)
-    {:noreply, %{state | 
-      skipped_counter: state[:skipped_counter] + 1,
-      pending: [test_result | state[:pending]]
-    }}
+
+    {:noreply,
+     %{
+       state
+       | skipped_counter: state[:skipped_counter] + 1,
+         pending: [test_result | state[:pending]]
+     }}
   end
 
   def handle_cast({:test_finished, %ExUnit.Test{state: {:invalid, _}}}, state) do
@@ -122,10 +127,13 @@ defmodule ExUnitJsonFormatter do
 
   def handle_cast({:test_finished, test = %ExUnit.Test{state: {:excluded, _}}}, state) do
     test_result = format_test_pass(test) |> Map.put("pending", true)
-    {:noreply, %{state | 
-      skipped_counter: state[:skipped_counter] + 1,
-      pending: [test_result | state[:pending]]
-    }}
+
+    {:noreply,
+     %{
+       state
+       | skipped_counter: state[:skipped_counter] + 1,
+         pending: [test_result | state[:pending]]
+     }}
   end
 
   # FORMATTING FUNCTIONS
